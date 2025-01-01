@@ -1,8 +1,10 @@
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:image/image.dart' as img;
+import 'package:image_picker/image_picker.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 
 void main() async {
@@ -18,6 +20,10 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color.fromARGB(255, 159, 206, 225),
+      ),
       home: DigitRecognizer(cameras: cameras),
     );
   }
@@ -35,20 +41,23 @@ class _DigitRecognizerState extends State<DigitRecognizer> {
   late CameraController _cameraController;
   late Interpreter _interpreter;
   final FlutterTts _flutterTts = FlutterTts();
+  final ImagePicker _picker = ImagePicker();
   bool _isProcessing = false;
+  bool _cameraInitialized = false;
+  bool _isFrontCamera = false;
+  XFile? _imageFile;
 
   @override
   void initState() {
     super.initState();
-    _initializeCamera();
     _loadModel();
   }
 
-  Future<void> _initializeCamera() async {
-    _cameraController =
-        CameraController(widget.cameras.first, ResolutionPreset.medium);
+  void _initializeCamera() async {
+    final camera = _isFrontCamera ? widget.cameras.last : widget.cameras.first;
+    _cameraController = CameraController(camera, ResolutionPreset.high);
     await _cameraController.initialize();
-    setState(() {});
+    setState(() => _cameraInitialized = true);
   }
 
   Future<void> _loadModel() async {
@@ -59,51 +68,36 @@ class _DigitRecognizerState extends State<DigitRecognizer> {
     }
   }
 
-
-
-Float32List preprocessImage(img.Image image) {
-  // Resize the image to 28x28.
-  final resizedImage = img.copyResize(image, width: 28, height: 28);
-
-  // Normalize pixel values to grayscale.
-  final input = Float32List(28 * 28);
-  for (int i = 0; i < 28; i++) {
-    for (int j = 0; j < 28; j++) {
-      final pixel = resizedImage.getPixel(j, i); // ARGB pixel value
-
-      // Extract red, green, and blue components
-      final red = img.getRed(pixel);   // Extract red channel
-      final green = img.getGreen(pixel); // Extract green channel (optional)
-      final blue = img.getBlue(pixel);  // Extract blue channel (optional)
-
-      // You can combine the channels for grayscale, for now using red only
-      input[i * 28 + j] = red / 255.0; // Normalize to [0.0, 1.0]
+  Float32List preprocessImage(img.Image image) {
+    final resizedImage = img.copyResize(image, width: 28, height: 28);
+    final input = Float32List(28 * 28);
+    for (int i = 0; i < 28; i++) {
+      for (int j = 0; j < 28; j++) {
+        final pixel = resizedImage.getPixel(j, i);
+        final red = img.getRed(pixel);
+        input[i * 28 + j] = red / 255.0;
+      }
     }
+    return Float32List.fromList(input);
   }
-
-  return Float32List.fromList(input); // Return the processed input
-}
 
   Future<int> _predictDigit(Uint8List imageBytes) async {
     final image = img.decodeImage(imageBytes);
     if (image == null) {
       debugPrint("Error decoding image.");
-      return -1; // Invalid prediction
+      return -1;
     }
 
     final input = preprocessImage(image);
-    final output =
-        Float32List(10); // Output is a 1D tensor of size 10 for probabilities
-
+    final output = Float32List(10);
     _interpreter.run(input.buffer.asFloat32List(), output);
 
-    // Find the digit with the highest probability
     final digit = output
         .indexWhere((val) => val == output.reduce((a, b) => a > b ? a : b));
     return digit;
   }
 
-  void _captureAndPredict() async {
+  Future<void> _captureAndRecognize() async {
     if (_isProcessing) return;
     setState(() => _isProcessing = true);
 
@@ -124,6 +118,29 @@ Float32List preprocessImage(img.Image image) {
     }
   }
 
+  void _flipCamera() {
+    setState(() {
+      _isFrontCamera = !_isFrontCamera;
+      _cameraController.dispose();
+      _initializeCamera();
+    });
+  }
+
+  Future<void> _pickImage() async {
+    final pickedFile = await _picker.pickImage(source: ImageSource.gallery);
+    if (pickedFile != null) {
+      setState(() => _imageFile = pickedFile);
+      final imageBytes = await File(pickedFile.path).readAsBytes();
+      final digit = await _predictDigit(imageBytes);
+
+      if (digit >= 0) {
+        await _flutterTts.speak("The number is $digit");
+      } else {
+        debugPrint("Failed to recognize digit.");
+      }
+    }
+  }
+
   @override
   void dispose() {
     _cameraController.dispose();
@@ -135,21 +152,78 @@ Float32List preprocessImage(img.Image image) {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Digit Recognizer")),
-      body: _cameraController.value.isInitialized
+      appBar: AppBar(
+        title: const Text("Digit Recognizer"),
+        backgroundColor: const Color.fromARGB(255, 44, 147, 168),
+      ),
+      body: _cameraInitialized
           ? Column(
               children: [
                 Expanded(child: CameraPreview(_cameraController)),
-                if (_isProcessing)
-                  const CircularProgressIndicator()
-                else
-                  ElevatedButton(
-                    onPressed: _captureAndPredict,
-                    child: const Text("Capture and Recognize"),
+                Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      ElevatedButton(
+                        onPressed: _pickImage,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor:
+                              const Color.fromARGB(255, 44, 147, 168),
+                          shape: const CircleBorder(),
+                          padding: const EdgeInsets.all(20),
+                        ),
+                        child: const Icon(Icons.photo_library,
+                            color: Colors.white, size: 50),
+                      ),
+                      ElevatedButton(
+                        onPressed: _captureAndRecognize,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor:
+                              const Color.fromARGB(255, 44, 147, 168),
+                          shape: const CircleBorder(),
+                          padding: const EdgeInsets.all(20),
+                        ),
+                        child: const Icon(Icons.camera,
+                            color: Colors.white, size: 50),
+                      ),
+                      ElevatedButton(
+                        onPressed: _flipCamera,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor:
+                              const Color.fromARGB(255, 44, 147, 168),
+                          shape: const CircleBorder(),
+                          padding: const EdgeInsets.all(20),
+                        ),
+                        child: const Icon(Icons.flip_camera_android,
+                            color: Colors.white, size: 50),
+                      ),
+                    ],
                   ),
+                ),
+                if (_imageFile != null) ...[
+                  const SizedBox(height: 20),
+                  Image.file(File(_imageFile!.path), height: 200),
+                ],
               ],
             )
-          : const Center(child: CircularProgressIndicator()),
+          : Center(
+              child: ElevatedButton(
+                onPressed: _initializeCamera,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color.fromARGB(255, 44, 147, 168),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
+                ),
+                child: const Text(
+                  "Launch Camera",
+                  style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white),
+                ),
+              ),
+            ),
     );
   }
 }
