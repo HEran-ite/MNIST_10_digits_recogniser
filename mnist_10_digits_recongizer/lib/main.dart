@@ -1,11 +1,9 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
-import 'package:tflite_flutter/tflite_flutter.dart';
+import 'package:tflite/tflite.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,7 +37,6 @@ class DigitRecognizer extends StatefulWidget {
 
 class _DigitRecognizerState extends State<DigitRecognizer> {
   late CameraController _cameraController;
-  late Interpreter _interpreter;
   final FlutterTts _flutterTts = FlutterTts();
   final ImagePicker _picker = ImagePicker();
   bool _isProcessing = false;
@@ -55,46 +52,43 @@ class _DigitRecognizerState extends State<DigitRecognizer> {
 
   void _initializeCamera() async {
     final camera = _isFrontCamera ? widget.cameras.last : widget.cameras.first;
-    _cameraController = CameraController(camera, ResolutionPreset.high);
+    _cameraController = CameraController(camera, ResolutionPreset.medium);
     await _cameraController.initialize();
     setState(() => _cameraInitialized = true);
   }
 
   Future<void> _loadModel() async {
     try {
-      _interpreter = await Interpreter.fromAsset('mnist_model.tflite');
+      String? result = await Tflite.loadModel(
+        model: "assets/mnist_model.tflite", // Ensure the model is in assets/
+      );
+      debugPrint("Model loaded: $result");
     } catch (e) {
       debugPrint("Error loading model: $e");
     }
   }
 
-  Float32List preprocessImage(img.Image image) {
-    final resizedImage = img.copyResize(image, width: 28, height: 28);
-    final input = Float32List(28 * 28);
-    for (int i = 0; i < 28; i++) {
-      for (int j = 0; j < 28; j++) {
-        final pixel = resizedImage.getPixel(j, i);
-        final red = img.getRed(pixel);
-        input[i * 28 + j] = red / 255.0;
-      }
-    }
-    return Float32List.fromList(input);
-  }
+  Future<int> _predictDigit(String imagePath) async {
+    try {
+      var recognitions = await Tflite.runModelOnImage(
+        path: imagePath, // Path to the image file
+        imageMean: 0.0,
+        imageStd: 255.0,
+        numResults: 1,
+        threshold: 0.1,
+      );
 
-  Future<int> _predictDigit(Uint8List imageBytes) async {
-    final image = img.decodeImage(imageBytes);
-    if (image == null) {
-      debugPrint("Error decoding image.");
+      if (recognitions != null && recognitions.isNotEmpty) {
+        final digit = recognitions[0]["index"] as int;
+        return digit;
+      } else {
+        debugPrint("No recognitions found.");
+        return -1;
+      }
+    } catch (e) {
+      debugPrint("Error during prediction: $e");
       return -1;
     }
-
-    final input = preprocessImage(image);
-    final output = Float32List(10);
-    _interpreter.run(input.buffer.asFloat32List(), output);
-
-    final digit = output
-        .indexWhere((val) => val == output.reduce((a, b) => a > b ? a : b));
-    return digit;
   }
 
   Future<void> _captureAndRecognize() async {
@@ -103,8 +97,7 @@ class _DigitRecognizerState extends State<DigitRecognizer> {
 
     try {
       final image = await _cameraController.takePicture();
-      final imageBytes = await image.readAsBytes();
-      final digit = await _predictDigit(imageBytes);
+      final digit = await _predictDigit(image.path);
 
       if (digit >= 0) {
         await _flutterTts.speak("The number is $digit");
@@ -118,20 +111,11 @@ class _DigitRecognizerState extends State<DigitRecognizer> {
     }
   }
 
-  void _flipCamera() {
-    setState(() {
-      _isFrontCamera = !_isFrontCamera;
-      _cameraController.dispose();
-      _initializeCamera();
-    });
-  }
-
   Future<void> _pickImage() async {
     final pickedFile = await _picker.pickImage(source: ImageSource.gallery);
     if (pickedFile != null) {
       setState(() => _imageFile = pickedFile);
-      final imageBytes = await File(pickedFile.path).readAsBytes();
-      final digit = await _predictDigit(imageBytes);
+      final digit = await _predictDigit(pickedFile.path);
 
       if (digit >= 0) {
         await _flutterTts.speak("The number is $digit");
@@ -141,10 +125,18 @@ class _DigitRecognizerState extends State<DigitRecognizer> {
     }
   }
 
+  void _flipCamera() {
+    setState(() {
+      _isFrontCamera = !_isFrontCamera;
+      _cameraController.dispose();
+      _initializeCamera();
+    });
+  }
+
   @override
   void dispose() {
     _cameraController.dispose();
-    _interpreter.close();
+    Tflite.close();
     _flutterTts.stop();
     super.dispose();
   }
@@ -208,20 +200,32 @@ class _DigitRecognizerState extends State<DigitRecognizer> {
               ],
             )
           : Center(
-              child: ElevatedButton(
-                onPressed: _initializeCamera,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color.fromARGB(255, 44, 147, 168),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
-                ),
-                child: const Text(
-                  "Launch Camera",
-                  style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white),
-                ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text(
+                    "Welcome to Digit Recognizer",
+                    style: TextStyle(fontSize: 20, color: Colors.white, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 20),
+                  Icon(Icons.camera_alt, size: 100, color: Colors.white),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: _initializeCamera,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color.fromARGB(255, 44, 147, 168),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 40, vertical: 20),
+                    ),
+                    child: const Text(
+                      "Launch Camera",
+                      style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white),
+                    ),
+                  ),
+                ],
               ),
             ),
     );
